@@ -47,3 +47,6 @@ Thumbs.db
 
 # Project data
 ai_files/
+
+# Temp files
+tmpclaude-*
