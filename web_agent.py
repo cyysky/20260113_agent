@@ -13,6 +13,7 @@ The AI can autonomously call these functions:
 
 import os
 import json
+import re
 from typing import Optional
 from dotenv import load_dotenv
 from litellm import completion, supports_function_calling
@@ -42,30 +43,7 @@ def search_web(query: str, num_results: int = 5) -> str:
             response = client.get(url, params=params, headers=headers)
             response.raise_for_status()
 
-        # Parse results from HTML
-        results = []
-        lines = response.text.split('\n')
-        in_result = False
-        current_result = {}
-
-        for line in lines:
-            if 'result__a' in line or 'result__title' in line:
-                in_result = True
-                current_result = {}
-            elif in_result and '<a href="' in line:
-                start = line.find('<a href="') + len('<a href="')
-                end = line.find('"', start)
-                if start > 9 and end > start:
-                    current_result['url'] = line[start:end]
-            elif in_result and '>' in line and not line.strip().startswith('<'):
-                text = line.strip()
-                if text and len(text) > 10:
-                    current_result['title'] = text[:200]
-            elif in_result and 'result__snippet' in line:
-                in_result = True  # Keep collecting snippet
-
-        # Extract cleaner results using simple parsing
-        import re
+        # Parse results from HTML using regex
         pattern = r'<a href="([^"]+)".*?>([^<]+)</a>'
         matches = re.findall(pattern, response.text)
 
@@ -107,7 +85,6 @@ def fetch_page(url: str, extract_text: bool = True) -> str:
 
         if "text/html" in content_type:
             # Simple HTML to text extraction
-            import re
             text = response.text
 
             # Remove script and style elements
@@ -207,6 +184,31 @@ When a user asks you to find information:
 Be thorough and verify information across multiple sources when appropriate. Always cite the sources you found."""
 
 
+def parse_tool_calls_from_content(content: str) -> list:
+    """Parse tool calls embedded in response content (for models that output XML-style tags)."""
+    tool_calls = []
+
+    # Match <tool_call>...</tool_call> blocks
+    pattern = r'<tool_call>\s*(\{[^}]+\})\s*</tool_call>'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    for i, match in enumerate(matches):
+        try:
+            func_data = json.loads(match)
+            tool_calls.append({
+                "id": f"call_{i}",
+                "type": "function",
+                "function": {
+                    "name": func_data.get("name", ""),
+                    "arguments": json.dumps(func_data.get("arguments", {}))
+                }
+            })
+        except json.JSONDecodeError:
+            continue
+
+    return tool_calls
+
+
 def call_agent(messages: list, tools: list = None, tool_choice: str = "auto") -> dict:
     """Call the LiteLLM agent with function calling support."""
     if not BASE_URL or not API_KEY:
@@ -231,12 +233,21 @@ def execute_tool_calls(tool_calls: list, available_functions: dict) -> list:
     messages = []
 
     for tool_call in tool_calls:
-        function_name = tool_call.function.name
+        # Handle both dict and object formats
+        if isinstance(tool_call, dict):
+            function_name = tool_call.get("function", {}).get("name", "")
+            function_args_str = tool_call.get("function", {}).get("arguments", "{}")
+            tool_call_id = tool_call.get("id", "unknown")
+        else:
+            function_name = tool_call.function.name
+            function_args_str = tool_call.function.arguments
+            tool_call_id = getattr(tool_call, 'id', "unknown")
+
         function_to_call = available_functions.get(function_name)
 
         if not function_to_call:
             messages.append({
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call_id,
                 "role": "tool",
                 "name": function_name,
                 "content": f"Error: Function '{function_name}' is not available.",
@@ -244,25 +255,25 @@ def execute_tool_calls(tool_calls: list, available_functions: dict) -> list:
             continue
 
         try:
-            function_args = json.loads(tool_call.function.arguments)
+            function_args = json.loads(function_args_str)
             function_response = function_to_call(**function_args)
 
             messages.append({
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call_id,
                 "role": "tool",
                 "name": function_name,
                 "content": function_response,
             })
         except json.JSONDecodeError as e:
             messages.append({
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call_id,
                 "role": "tool",
                 "name": function_name,
                 "content": f"Error: Invalid JSON arguments: {e}",
             })
         except Exception as e:
             messages.append({
-                "tool_call_id": tool_call.id,
+                "tool_call_id": tool_call_id,
                 "role": "tool",
                 "name": function_name,
                 "content": f"Error executing function: {e}",
@@ -290,26 +301,41 @@ def chat(user_message: str, conversation_history: list = None) -> tuple[str, lis
         return response["error"], conversation_history
 
     response_message = response.choices[0].message
-    tool_calls = response_message.tool_calls
+    content = response_message.content or ""
 
-    # If no tool calls, return the regular response
+    # Try standard tool_calls first, then fall back to parsing from content
+    tool_calls = getattr(response_message, 'tool_calls', None)
+
+    # If no tool_calls in response, check if they are embedded in content as XML tags
     if not tool_calls:
-        return response_message.content or "", conversation_history + [
+        tool_calls = parse_tool_calls_from_content(content)
+
+    # If no tool calls found, return the response as-is
+    if not tool_calls:
+        return content, conversation_history + [
             {"role": "user", "content": user_message},
-            {"role": "assistant", "content": response_message.content},
+            {"role": "assistant", "content": content},
         ]
+
+    # Remove the tool call XML tags from the content for display
+    clean_content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL).strip()
+    if not clean_content:
+        clean_content = None  # Let it be None if no other content
 
     # Append assistant's message with tool calls
     messages.append({
         "role": "assistant",
-        "content": response_message.content,
+        "content": clean_content,
         "tool_calls": [
             {
-                "id": tc.id,
+                "id": tc.get("id", f"call_{i}") if isinstance(tc, dict) else tc.id,
                 "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                "function": {
+                    "name": tc.get("function", {}).get("name", "") if isinstance(tc, dict) else tc.function.name,
+                    "arguments": tc.get("function", {}).get("arguments", "{}") if isinstance(tc, dict) else tc.function.arguments
+                },
             }
-            for tc in tool_calls
+            for i, tc in enumerate(tool_calls)
         ],
     })
 
