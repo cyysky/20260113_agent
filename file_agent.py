@@ -188,6 +188,11 @@ When a user asks you to perform file operations:
 - Use read_file to show contents when asked to read something
 - Use write_file to create or modify files
 
+IMPORTANT for multi-step requests:
+- If the user's request includes content to write (e.g., "save this information to a file" or the user provides markdown/text content), immediately use write_file with the appropriate filename and content.
+- Extract the filename from the user's request (e.g., "save to report.md" -> report.md)
+- Write the provided content exactly as given, or summarize/paraphrase if instructed
+
 Only access files within {FOLDER_PATH}. Be helpful and concise.
 """
 
@@ -256,66 +261,87 @@ def execute_tool_calls(tool_calls: list, available_functions: dict) -> list:
     return messages
 
 
-def chat(user_message: str, conversation_history: list = None) -> tuple[str, list]:
+def chat(user_message: str, conversation_history: list = None, max_turns: int = 5) -> tuple[str, list]:
     """Chat with the agent, handling function calls automatically."""
     if conversation_history is None:
         conversation_history = []
 
-    # Add system prompt and user message
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ] + conversation_history + [
-        {"role": "user", "content": user_message},
-    ]
-
-    # Initial call with tools
-    response = call_agent(messages, tools=TOOLS, tool_choice="auto")
-
-    if "error" in response:
-        return response["error"], conversation_history
-
-    response_message = response.choices[0].message
-    tool_calls = response_message.tool_calls
-
-    # If no tool calls, return the regular response
-    if not tool_calls:
-        return response_message.content or "", conversation_history + [
+    try:
+        # Add system prompt and user message
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+        ] + conversation_history + [
             {"role": "user", "content": user_message},
-            {"role": "assistant", "content": response_message.content},
         ]
 
-    # Append assistant's message with tool calls
-    messages.append({
-        "role": "assistant",
-        "content": response_message.content,
-        "tool_calls": [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-            }
-            for tc in tool_calls
-        ],
-    })
+        # Initial call with tools
+        response = call_agent(messages, tools=TOOLS, tool_choice="auto")
 
-    # Execute tool calls
-    tool_results = execute_tool_calls(tool_calls, AVAILABLE_FUNCTIONS)
-    messages.extend(tool_results)
+        if "error" in response:
+            return response["error"], conversation_history
 
-    # Get final response from model
-    final_response = call_agent(messages, tools=None, tool_choice=None)
+        if not hasattr(response, 'choices') or not response.choices:
+            return "Error: Invalid response from API", conversation_history
 
-    if "error" in final_response:
-        return final_response["error"], messages
+        response_message = response.choices[0].message
+        if not hasattr(response_message, 'tool_calls'):
+            # No tool calls, return regular response
+            content = response_message.content or ""
+            new_history = conversation_history + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": content},
+            ]
+            return content, new_history
 
-    final_message = final_response.choices[0].message
+        tool_calls = response_message.tool_calls
 
-    # Update conversation history
-    conversation_history = messages + [
-        {"role": "assistant", "content": final_message.content},
-    ]
+        # If no tool calls, return the regular response
+        if not tool_calls:
+            content = response_message.content or ""
+            new_history = conversation_history + [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": content},
+            ]
+            return content, new_history
 
-    return final_message.content or "", conversation_history
+        # Append assistant's message with tool calls
+        messages.append({
+            "role": "assistant",
+            "content": response_message.content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in tool_calls
+            ],
+        })
+
+        # Execute tool calls
+        tool_results = execute_tool_calls(tool_calls, AVAILABLE_FUNCTIONS)
+        messages.extend(tool_results)
+
+        # Get final response from model
+        final_response = call_agent(messages, tools=None, tool_choice=None)
+
+        if "error" in final_response:
+            return final_response["error"], messages
+
+        if not hasattr(final_response, 'choices') or not final_response.choices:
+            return "Error: Invalid final response from API", messages
+
+        final_message = final_response.choices[0].message
+
+        # Update conversation history
+        conversation_history = messages + [
+            {"role": "assistant", "content": final_message.content},
+        ]
+
+        return final_message.content or "", conversation_history
+
+    except Exception as e:
+        return f"Error in file_agent: {str(e)}", conversation_history
 
 
 def main():

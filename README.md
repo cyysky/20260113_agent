@@ -1,6 +1,6 @@
 # AI Agents
 
-A collection of CLI agents that use LiteLLM with Function Calling to perform various tasks.
+A collection of CLI agents that use LiteLLM with Function Calling to perform various tasks, with an Orchestrator to coordinate multiple agents.
 
 ## Agents
 
@@ -27,6 +27,29 @@ Browses the internet autonomously using AI function calling.
 - Multi-round tool calling support
 
 **See:** [Web Agent Documentation](web_agent.py)
+
+### Summary Agent
+
+Creates well-formatted markdown summaries from raw research data.
+
+**Features:**
+- Converts raw search/fetch results into clean markdown
+- Organizes content with proper structure
+- Includes source citations
+
+**See:** [Summary Agent Documentation](summary_agent.py)
+
+### Orchestrator Agent
+
+Coordinates multiple agents to handle complex multi-step tasks.
+
+**Features:**
+- Routes requests to appropriate agents
+- Supports sequential agent pipelines (e.g., search -> summarize -> save)
+- Automatic agent detection based on task type
+- Maintains conversation history across agents
+
+**See:** [Orchestrator Documentation](orchestrator.py)
 
 ---
 
@@ -62,8 +85,64 @@ Models that support function calling:
 - `xai/grok-2-latest`
 - Other function-calling supported models
 
+## Orchestrator Usage
+
+The Orchestrator coordinates multiple agents for complex tasks. Example workflow:
+
+```bash
+# Start the orchestrator
+python orchestrator.py
+```
+
+**Example commands:**
+```
+> search for 2025 ai news related to malaysia and save it into .md file
+> find information about python tutorials and write to notes.md
+> look up latest tech news and create a summary document
+```
+
+**Available commands in Orchestrator:**
+- `/agents` - List all registered agents
+- `/history` - Show conversation history
+- `/clear` - Clear conversation history
+- `/quit` - Exit
+
+**Agent Pipeline:**
+For "search and save" requests, the orchestrator automatically runs:
+1. `web_agent` - Gathers information from the web
+2. `summary_agent` - Creates well-formatted markdown
+3. `file_agent` - Writes content to file
+
+## Adding New Agents
+
+To add a new agent:
+
+1. Create your agent module (e.g., `db_agent.py`)
+2. Export these required components:
+   - `SYSTEM_PROMPT` - Agent's system prompt
+   - `TOOLS` - List of tool definitions
+   - `AVAILABLE_FUNCTIONS` - Dict of function name -> callable
+   - `chat_func(message, history, max_turns)` - Chat function
+
+3. Register in orchestrator.py:
+```python
+def create_db_agent():
+    import db_agent
+    return Agent(
+        name="db_agent",
+        description="Database operations",
+        system_prompt=db_agent.SYSTEM_PROMPT,
+        tools=db_agent.TOOLS,
+        available_functions=db_agent.AVAILABLE_FUNCTIONS,
+        chat_func=db_agent.chat,
+    )
+
+orchestrator.register_agent(create_db_agent())
+```
+
 ## Requirements
 
 - Python 3.8+
 - litellm >= 1.0.0
 - httpx >= 0.25.0 (for web agent)
+- python-dotenv >= 1.0.0

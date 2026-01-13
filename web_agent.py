@@ -374,75 +374,104 @@ def execute_tool_calls(tool_calls: list, available_functions: dict) -> list:
     return messages
 
 
-def chat(user_message: str, conversation_history: list = None) -> tuple[str, list]:
+def chat(user_message: str, conversation_history: list = None, max_turns: int = 5) -> tuple[str, list]:
     """Chat with the agent, handling function calls automatically."""
     if conversation_history is None:
         conversation_history = []
 
-    # Add system prompt and user message
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-    ] + conversation_history + [
-        {"role": "user", "content": user_message},
-    ]
+    try:
+        # Add system prompt and user message
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+        ] + conversation_history + [
+            {"role": "user", "content": user_message},
+        ]
 
-    # Initial call with tools
-    response = call_agent(messages, tools=TOOLS, tool_choice="auto")
-
-    if "error" in response:
-        return response["error"], conversation_history
-
-    # Process response and handle any tool calls (may be multiple rounds)
-    while True:
-        response_message = response.choices[0].message
-        content = response_message.content or ""
-
-        # Try standard tool_calls first, then fall back to parsing from content
-        tool_calls = getattr(response_message, 'tool_calls', None)
-
-        # If no tool_calls in response, check if they are embedded in content as XML tags
-        if not tool_calls:
-            tool_calls = parse_tool_calls_from_content(content)
-
-        # If no tool calls found, we're done
-        if not tool_calls:
-            conversation_history = messages + [
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": content},
-            ]
-            return content, conversation_history
-
-        # Remove the tool call XML tags from the content for display
-        clean_content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL).strip()
-        if not clean_content:
-            clean_content = None  # Let it be None if no other content
-
-        # Append assistant's message with tool calls
-        messages.append({
-            "role": "assistant",
-            "content": clean_content,
-            "tool_calls": [
-                {
-                    "id": tc.get("id", f"call_{i}") if isinstance(tc, dict) else tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.get("function", {}).get("name", "") if isinstance(tc, dict) else tc.function.name,
-                        "arguments": tc.get("function", {}).get("arguments", "{}") if isinstance(tc, dict) else tc.function.arguments
-                    },
-                }
-                for i, tc in enumerate(tool_calls)
-            ],
-        })
-
-        # Execute tool calls
-        tool_results = execute_tool_calls(tool_calls, AVAILABLE_FUNCTIONS)
-        messages.extend(tool_results)
-
-        # Get next response from model (keep tools enabled for multi-round calls)
+        # Initial call with tools
         response = call_agent(messages, tools=TOOLS, tool_choice="auto")
 
         if "error" in response:
-            return response["error"], messages
+            return response["error"], conversation_history
+
+        if not hasattr(response, 'choices') or not response.choices:
+            return "Error: Invalid response from API", conversation_history
+
+        # Process response and handle any tool calls (may be multiple rounds)
+        turn_count = 0
+        while turn_count < max_turns:
+            try:
+                response_message = response.choices[0].message
+            except (AttributeError, IndexError):
+                return "Error: Invalid response message", messages
+
+            content = response_message.content or ""
+
+            # Try standard tool_calls first, then fall back to parsing from content
+            tool_calls = getattr(response_message, 'tool_calls', None)
+
+            # If no tool_calls in response, check if they are embedded in content as XML tags
+            if not tool_calls:
+                tool_calls = parse_tool_calls_from_content(content)
+
+            # If no tool calls found, we're done
+            if not tool_calls:
+                conversation_history = messages + [
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": content},
+                ]
+                return content, conversation_history
+
+            # Remove the tool call XML tags from the content for display
+            clean_content = re.sub(r'<tool_call>.*?</tool_call>', '', content, flags=re.DOTALL).strip()
+            if not clean_content:
+                clean_content = None  # Let it be None if no other content
+
+            # Append assistant's message with tool calls
+            messages.append({
+                "role": "assistant",
+                "content": clean_content,
+                "tool_calls": [
+                    {
+                        "id": tc.get("id", f"call_{i}") if isinstance(tc, dict) else tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.get("function", {}).get("name", "") if isinstance(tc, dict) else tc.function.name,
+                            "arguments": tc.get("function", {}).get("arguments", "{}") if isinstance(tc, dict) else tc.function.arguments
+                        },
+                    }
+                    for i, tc in enumerate(tool_calls)
+                ],
+            })
+
+            # Execute tool calls
+            tool_results = execute_tool_calls(tool_calls, AVAILABLE_FUNCTIONS)
+            messages.extend(tool_results)
+
+            # Get next response from model (keep tools enabled for multi-round calls)
+            response = call_agent(messages, tools=TOOLS, tool_choice="auto")
+
+            if "error" in response:
+                return response["error"], messages
+
+            if not hasattr(response, 'choices') or not response.choices:
+                return "Error: Invalid response in loop", messages
+
+            turn_count += 1
+
+        # Max turns reached, return last response
+        try:
+            response_message = response.choices[0].message
+            content = response_message.content or ""
+        except (AttributeError, IndexError):
+            content = "Max turns reached"
+        conversation_history = messages + [
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": content},
+        ]
+        return content, conversation_history
+
+    except Exception as e:
+        return f"Error in web_agent: {str(e)}", conversation_history
 
 
 def main():
