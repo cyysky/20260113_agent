@@ -66,4 +66,4 @@ Models that support function calling:
 
 - Python 3.8+
 - litellm >= 1.0.0
-- httpx >= 0.25.0 (for web agent)# 20260113_agent
+- httpx >= 0.25.0 (for web agent)
