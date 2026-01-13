@@ -1,5 +1,5 @@
 """
-Orchestrator Agent - Manages multiple agents and routes requests
+Orchestrator Agent - Manages multiple agents with LLM-planned workflows
 
 Configure via environment variables:
 - LITELLM_BASEURL: The base URL for LiteLLM API
@@ -12,6 +12,7 @@ Usage:
 
 import os
 import json
+import re
 from typing import Dict, List, Any, Optional, Callable
 from dotenv import load_dotenv
 from litellm import completion
@@ -45,8 +46,26 @@ class Agent:
         self.chat_func = chat_func
 
 
+class AgentStep:
+    """Represents a step in an agent execution plan."""
+
+    def __init__(self, agent_name: str, purpose: str, max_turns: int = 3, input_type: str = "user_message"):
+        self.agent_name = agent_name
+        self.purpose = purpose
+        self.max_turns = max_turns
+        self.input_type = input_type  # "user_message", "accumulated", "tool_results"
+
+    def to_dict(self) -> dict:
+        return {
+            "agent": self.agent_name,
+            "purpose": self.purpose,
+            "max_turns": self.max_turns,
+            "input": self.input_type,
+        }
+
+
 class Orchestrator:
-    """Orchestrates multiple agents and routes requests appropriately."""
+    """Orchestrates multiple agents with LLM-planned workflows."""
 
     def __init__(self):
         self.agents: Dict[str, Agent] = {}
@@ -68,47 +87,73 @@ class Orchestrator:
         return result.strip()
 
     def get_agent_capabilities(self) -> Dict[str, Any]:
-        """Get all agent capabilities for routing decisions."""
+        """Get all agent capabilities for planning decisions."""
         capabilities = {}
         for name, agent in self.agents.items():
             capabilities[name] = {
                 "description": agent.description,
-                "tools": [t.get("function", {}).get("name") for t in agent.tools],
+                "tools": [t.get("function", {}).get("name") for t in agent.tools if t.get("function")],
             }
         return capabilities
 
-    def route_request(self, user_message: str) -> tuple[str, list, bool]:
-        """Route the user request to the appropriate agent(s).
+    def plan_execution(self, user_message: str) -> List[AgentStep]:
+        """Let the LLM plan the execution pipeline.
 
         Returns:
-            tuple: (primary_agent, list_of_agents, requires_sequential)
+            List of AgentStep objects representing the execution plan
         """
         if not self.agents:
-            return "", [], False
+            return []
 
-        # Build a routing prompt
         capabilities = self.get_agent_capabilities()
-        routing_prompt = f"""You are a request router. Your job is to determine which agent(s) should handle the user's request.
 
-Available Agents and their capabilities:
+        planning_prompt = f"""You are an expert workflow planner. Given a user's request, create a detailed execution plan using the available agents.
+
+Available Agents:
 {json.dumps(capabilities, indent=2)}
 
-User request: "{user_message}"
+User Request: "{user_message}"
 
-Respond with a JSON object containing:
-- "agents": array of agent names to use in order
-- "reason": brief explanation of why
+Create a step-by-step execution plan. Respond with a JSON object containing:
+- "steps": array of execution steps
 
-IMPORTANT: For research + save tasks (like "search for X and save to file"), use this order:
-["web_agent", "summary_agent", "file_agent"]
-1. web_agent - gathers information
-2. summary_agent - creates well-formatted summary from raw results
-3. file_agent - writes final content to file
+Each step should have:
+- "agent": the agent name to use
+- "purpose": what this step accomplishes
+- "max_turns": how many turns to allow (higher for research tasks)
+- "input": what to pass ("user_message", "accumulated", "tool_results", or "step_output")
 
-Example responses:
-- "{{"agents": ["web_agent", "summary_agent", "file_agent"], "reason": "Research topic then summarize and save to file"}}"
-- "{{"agents": ["file_agent"], "reason": "Simple file operation"}}"
-- "{{"agents": ["web_agent"], "reason": "Web research only"}}"
+Guidelines:
+1. For research + save tasks: use web_agent first, then summary_agent, then file_agent
+2. For web research: web_agent needs 10-15 turns to search and fetch multiple sources
+3. For summarization: pass the accumulated content or tool results
+4. For file writing: pass the final formatted content
+5. Keep pipelines minimal - don't add unnecessary steps
+
+Example Response:
+{{
+    "steps": [
+        {{
+            "agent": "web_agent",
+            "purpose": "Research the topic and gather information from the web",
+            "max_turns": 15,
+            "input": "user_message"
+        }},
+        {{
+            "agent": "summary_agent",
+            "purpose": "Create a well-formatted summary from the research",
+            "max_turns": 3,
+            "input": "tool_results"
+        }},
+        {{
+            "agent": "file_agent",
+            "purpose": "Write the summary to the specified file",
+            "max_turns": 3,
+            "input": "step_output"
+        }}
+    ],
+    "reason": "The user wants to research a topic and save results to a file"
+}}
 """
 
         try:
@@ -116,96 +161,97 @@ Example responses:
                 model=MODEL,
                 base_url=BASE_URL,
                 api_key=API_KEY,
-                messages=[{"role": "system", "content": routing_prompt}],
+                messages=[{"role": "system", "content": planning_prompt}],
                 tool_choice=None,
             )
 
             content = response.choices[0].message.content or ""
-            # Try to parse the JSON from the response
+
+            # Parse the JSON response
             try:
-                # Handle potential markdown code blocks
+                # Handle markdown code blocks
                 if "```json" in content:
                     content = content.split("```json")[1].split("```")[0]
                 elif "```" in content:
                     content = content.split("```")[1].split("```")[0]
 
-                routing = json.loads(content)
-                agent_names = routing.get("agents", [])
-                reason = routing.get("reason", "")
+                plan_data = json.loads(content)
+                steps = plan_data.get("steps", [])
 
-                # Filter to only registered agents
-                valid_agents = [a for a in agent_names if a in self.agents]
+                # Convert to AgentStep objects, filtering valid agents
+                agent_steps = []
+                for step in steps:
+                    agent_name = step.get("agent")
+                    if agent_name in self.agents:
+                        agent_step = AgentStep(
+                            agent_name=agent_name,
+                            purpose=step.get("purpose", ""),
+                            max_turns=step.get("max_turns", 3),
+                            input_type=step.get("input", "user_message"),
+                        )
+                        agent_steps.append(agent_step)
 
-                if valid_agents:
-                    return valid_agents[0], valid_agents, len(valid_agents) > 1
-                else:
-                    # Fallback to first agent
-                    return list(self.agents.keys())[0], [list(self.agents.keys())[0]], False
-            except (json.JSONDecodeError, IndexError):
-                # Fallback: simple keyword matching
-                return self._simple_route(user_message)
+                if agent_steps:
+                    print(f"[Planning] LLM planned {len(agent_steps)} steps")
+                    for i, step in enumerate(agent_steps):
+                        print(f"  {i+1}. {step.agent_name}: {step.purpose}")
+                    return agent_steps
+
+            except (json.JSONDecodeError, AttributeError) as e:
+                print(f"[Planning] JSON parse error: {e}")
 
         except Exception as e:
-            return self._simple_route(user_message)
+            print(f"[Planning] LLM error: {e}")
 
-    def _simple_route(self, user_message: str) -> tuple:
-        """Simple keyword-based routing as fallback."""
+        # Fallback to simple planning
+        print("[Planning] Using fallback planner")
+        return self._fallback_plan(user_message)
+
+    def _fallback_plan(self, user_message: str) -> List[AgentStep]:
+        """Simple fallback planner based on keywords."""
         message_lower = user_message.lower()
-        agents_to_use = []
+        steps = []
 
-        # Check for search/fetch web operations -> web_agent
-        if any(kw in message_lower for kw in ["search", "find", "fetch", "browse", "web", "internet", "look up"]):
-            agents_to_use.append("web_agent")
+        # Check for web research
+        if any(kw in message_lower for kw in ["search", "find", "browse", "web", "look up", "research"]):
+            steps.append(AgentStep(
+                agent_name="web_agent",
+                purpose="Search and gather information from the web",
+                max_turns=15,
+                input_type="user_message"
+            ))
 
-        # Check for research + save operations -> summary_agent + file_agent
-        if any(kw in message_lower for kw in ["save", "write", "create"]) and "search" in message_lower:
-            # For search + save, add summary and file agents
-            if "summary_agent" in self.agents:
-                agents_to_use.append("summary_agent")
-            if "file_agent" in self.agents:
-                agents_to_use.append("file_agent")
-        elif any(kw in message_lower for kw in ["write", "save", "create", "file"]):
-            agents_to_use.append("file_agent")
+        # Check for summarization need
+        if any(kw in message_lower for kw in ["summarize", "summary", "summarise"]):
+            steps.append(AgentStep(
+                agent_name="summary_agent",
+                purpose="Create a well-formatted summary",
+                max_turns=3,
+                input_type="accumulated"
+            ))
 
-        # If we have matches, use them (dedup and preserve order)
-        if agents_to_use:
-            agents_to_use = list(dict.fromkeys(agents_to_use))
-            return agents_to_use[0], agents_to_use, len(agents_to_use) > 1
+        # Check for file operations
+        if any(kw in message_lower for kw in ["save", "write", "create", "file", "export"]):
+            steps.append(AgentStep(
+                agent_name="file_agent",
+                purpose="Write content to file",
+                max_turns=3,
+                input_type="accumulated"
+            ))
 
-        # Default to first registered agent
-        if self.agents:
-            default = list(self.agents.keys())[0]
-            return default, [default], False
+        # If only file operation without research
+        if not steps and any(kw in message_lower for kw in ["list", "read", "show files"]):
+            steps.append(AgentStep(
+                agent_name="file_agent",
+                purpose="Perform file operation",
+                max_turns=3,
+                input_type="user_message"
+            ))
 
-        return "", [], False
-
-    def process_request(self, user_message: str) -> str:
-        """Process a user request by routing to the appropriate agent(s)."""
-        if not self.agents:
-            return "Error: No agents registered."
-
-        # Route the request
-        primary_agent, all_agents, requires_sequential = self.route_request(user_message)
-
-        if not primary_agent:
-            return "Error: Could not determine which agent to use."
-
-        if requires_sequential and len(all_agents) > 1:
-            # Multi-step request: execute agents in sequence
-            return self._process_sequential(user_message, all_agents)
-        else:
-            # Single agent request
-            agent = self.agents[primary_agent]
-            print(f"\n[Routing] {primary_agent}")
-            print("-" * 50)
-
-            response, self.conversation_history = agent.chat_func(
-                user_message, self.conversation_history, max_turns=3
-            )
-            return response
+        return steps
 
     def _extract_tool_results_from_history(self, conversation_history: list) -> str:
-        """Extract full tool call results from conversation history (non-truncated)."""
+        """Extract full tool call results from conversation history."""
         results = []
         for msg in conversation_history:
             if msg.get("role") == "tool":
@@ -215,108 +261,114 @@ Example responses:
                     results.append(f"=== {name.upper()} RESULT ===\n{content}")
         return "\n\n".join(results)
 
-    def _process_sequential(self, user_message: str, agent_names: list) -> str:
-        """Process a request using multiple agents in sequence."""
+    def _execute_plan(self, user_message: str, plan: List[AgentStep]) -> str:
+        """Execute the planned workflow."""
         accumulated_content = ""
+        step_outputs = {}  # Store outputs from each step
         tool_results = ""
 
-        for i, agent_name in enumerate(agent_names):
-            agent = self.agents[agent_name]
-            print(f"\n[Step {i+1}/{len(agent_names)}] {agent_name}")
+        for i, step in enumerate(plan):
+            agent = self.agents.get(step.agent_name)
+            if not agent:
+                print(f"[Warning] Agent {step.agent_name} not found, skipping")
+                continue
+
+            print(f"\n[Step {i+1}/{len(plan)}] {step.agent_name}")
+            print(f"Purpose: {step.purpose}")
             print("-" * 50)
 
-            if i == 0:
-                # First agent runs normally - give it more turns for web search
-                max_turns_for_agent = 15 if agent_name == "web_agent" else 3
-                response, self.conversation_history = agent.chat_func(
-                    user_message, self.conversation_history, max_turns=max_turns_for_agent
-                )
-                accumulated_content = response
-                # Extract the actual tool results from history (full, non-truncated content)
-                tool_results = self._extract_tool_results_from_history(self.conversation_history)
+            # Determine input for this step
+            if step.input_type == "user_message":
+                current_input = user_message
+            elif step.input_type == "accumulated":
+                current_input = f"""Original Request: {user_message}
 
-            elif agent_name == "summary_agent":
-                # Use summary agent to create well-formatted summary
-                print("\nSummarizing raw content...")
-                try:
-                    import summary_agent
-                    # Extract topic from user message
-                    import re
-                    topic_match = re.search(r'(?:search|find|look up|get)\s+(?:for\s+)?(.+?)\s*(?:and|then|to|into|\.)', user_message, re.IGNORECASE)
-                    if not topic_match:
-                        topic_match = re.search(r'(?:about|on|regarding)\s+(.+?)(?:\s+and|\s+to|\s+into|\s*$)', user_message, re.IGNORECASE)
-                    topic = topic_match.group(1).strip() if topic_match else "Research Summary"
-
-                    summarized, self.conversation_history = summary_agent.summarize(
-                        topic, tool_results, self.conversation_history
-                    )
-                    accumulated_content = summarized
-                    print(f"\nSummary created ({len(summarized)} chars)")
-                except Exception as e:
-                    accumulated_content = f"# Summary\n\n{tool_results}"
-                    print(f"\nError in summary_agent: {e}")
-                    # Print first 500 chars of what would be written
-                    preview = accumulated_content[:500] + "..." if len(accumulated_content) > 500 else accumulated_content
-                    print(f"Writing raw content instead:\n{preview}\n")
-
-            elif agent_name == "file_agent":
-                # Pass the content to write
-                print(f"\nPassing content to {agent_name}...")
-                import re
-                filename_match = re.search(r'save.*?into\s+(\S+\.md)', user_message, re.IGNORECASE)
-                if not filename_match:
-                    filename_match = re.search(r'save.*?to\s+(\S+\.md)', user_message, re.IGNORECASE)
-                filename = filename_match.group(1) if filename_match else "output.md"
-
-                content_to_write = accumulated_content
-
-                # Check if content has markdown code blocks
-                if "```markdown" in content_to_write:
-                    content_to_write = content_to_write.split("```markdown")[1].split("```")[0]
-                elif "```" in content_to_write:
-                    code_match = re.search(r'```[a-z]*\n([\s\S]*?)\n```', content_to_write)
-                    if code_match:
-                        content_to_write = code_match.group(1)
-
-                # Call file_agent's write_file directly
-                result = agent.available_functions.get("write_file")(filename, content_to_write.strip())
-                print(f"\n{result}")
-                accumulated_content = result
-
-            else:
-                # For other agents, pass context
-                context_prompt = f"""Original request: {user_message}
-
-Information gathered so far:
+Previous Results:
 {accumulated_content}
 
-Complete the task."""
+Continue based on the above context."""
+            elif step.input_type == "tool_results":
+                current_input = f"""Research Topic: {user_message}
+
+Raw Research Data:
+{tool_results}
+
+Task: Create a comprehensive, well-formatted summary."""
+            elif step.input_type == "step_output":
+                # Get output from a specific previous step
+                prev_step_idx = -1
+                for j in range(i - 1, -1, -1):
+                    if plan[j].agent_name in step_outputs:
+                        prev_step_idx = j
+                        break
+                if prev_step_idx >= 0:
+                    current_input = f"""Write the following content to a file:
+
+{step_outputs[plan[prev_step_idx].agent_name]}
+
+Original request: {user_message}"""
+                else:
+                    current_input = f"""Write the following content:
+
+{accumulated_content}"""
+            else:
+                current_input = user_message
+
+            # Execute the agent
+            try:
                 response, self.conversation_history = agent.chat_func(
-                    context_prompt, self.conversation_history, max_turns=3
+                    current_input, self.conversation_history, max_turns=step.max_turns
                 )
                 accumulated_content = response
+                step_outputs[step.agent_name] = response
 
-            print(f"\n{accumulated_content}\n")
+                # Extract tool results if this is web_agent
+                if step.agent_name == "web_agent":
+                    tool_results = self._extract_tool_results_from_history(self.conversation_history)
+
+                print(f"\n[Output ({len(response)} chars)]\n{response[:500]}..." if len(response) > 500 else f"\n[Output]\n{response}")
+
+            except Exception as e:
+                print(f"[Error] Step failed: {e}")
+                accumulated_content += f"\n[Error in {step.agent_name}]: {str(e)}"
 
         return accumulated_content
 
+    def process_request(self, user_message: str) -> str:
+        """Process a user request by planning and executing a workflow."""
+        if not self.agents:
+            return "Error: No agents registered."
+
+        print(f"\n[Request] {user_message}")
+
+        # Let LLM plan the execution
+        plan = self.plan_execution(user_message)
+
+        if not plan:
+            return "Error: Could not create execution plan."
+
+        # Execute the plan
+        result = self._execute_plan(user_message, plan)
+        return result
+
     def run_loop(self):
         """Run the main interactive loop."""
-        print("Orchestrator Agent - Multi-Agent System")
-        print("=" * 50)
+        print("Orchestrator Agent - LLM-Planned Multi-Agent System")
+        print("=" * 60)
         print(f"  LITELLM_BASEURL: {BASE_URL or 'NOT SET'}")
         print(f"  LITELLM_MODEL: {MODEL}")
         print(f"  Registered Agents: {len(self.agents)}")
         print()
         print(self.list_agents())
         print()
-        print("=" * 50)
+        print("=" * 60)
         print("Commands:")
         print("  /agents - List all registered agents")
+        print("  /plan <query> - Show the planned agent pipeline for a query")
         print("  /history - Show conversation history")
         print("  /clear - Clear conversation history")
         print("  /quit - Exit")
-        print("=" * 50)
+        print("=" * 60)
         print()
 
         while True:
@@ -333,6 +385,21 @@ Complete the task."""
 
                 if user_input.lower() == "/agents":
                     print(f"\n{self.list_agents()}\n")
+                    continue
+
+                if user_input.lower() == "/plan":
+                    print("[Error] Please provide a query. Usage: /plan <query>")
+                    continue
+
+                if user_input.lower().startswith("/plan "):
+                    query = user_input[6:].strip()
+                    plan = self.plan_execution(query)
+                    print(f"\nPlanned Pipeline ({len(plan)} steps):")
+                    for i, step in enumerate(plan):
+                        print(f"  {i+1}. {step.agent_name}")
+                        print(f"     - {step.purpose}")
+                        print(f"     - max_turns: {step.max_turns}, input: {step.input_type}")
+                    print()
                     continue
 
                 if user_input.lower() == "/history":
@@ -353,7 +420,8 @@ Complete the task."""
 
                 # Process the request
                 response = self.process_request(user_input)
-                print(f"\n{response}\n")
+                print(f"\n{'=' * 60}")
+                print(f"RESULT:\n{response}\n{'=' * 60}\n")
 
             except KeyboardInterrupt:
                 print("\nGoodbye!")

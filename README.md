@@ -41,12 +41,13 @@ Creates well-formatted markdown summaries from raw research data.
 
 ### Orchestrator Agent
 
-Coordinates multiple agents to handle complex multi-step tasks.
+Coordinates multiple agents using LLM-planned workflows.
 
 **Features:**
-- Routes requests to appropriate agents
-- Supports sequential agent pipelines (e.g., search -> summarize -> save)
-- Automatic agent detection based on task type
+- **LLM-Planned Pipelines**: The LLM dynamically plans the best agent sequence for each request
+- **Flexible Input Routing**: Each step knows what input to pass (user message, accumulated content, or tool results)
+- **Extensible Design**: Easily add new agents - the LLM will consider them for planning
+- **Fallback Planning**: Simple keyword-based planner if LLM planning fails
 - Maintains conversation history across agents
 
 **See:** [Orchestrator Documentation](orchestrator.py)
@@ -87,12 +88,18 @@ Models that support function calling:
 
 ## Orchestrator Usage
 
-The Orchestrator coordinates multiple agents for complex tasks. Example workflow:
+The Orchestrator uses LLM-powered workflow planning to handle complex multi-step tasks.
 
 ```bash
 # Start the orchestrator
 python orchestrator.py
 ```
+
+**How it works:**
+1. User submits a request
+2. LLM analyzes the request and available agents
+3. LLM creates a dynamic execution plan
+4. Orchestrator executes each step in sequence
 
 **Example commands:**
 ```
@@ -103,15 +110,20 @@ python orchestrator.py
 
 **Available commands in Orchestrator:**
 - `/agents` - List all registered agents
+- `/plan <query>` - Preview the planned agent pipeline for a query
 - `/history` - Show conversation history
 - `/clear` - Clear conversation history
 - `/quit` - Exit
 
-**Agent Pipeline:**
-For "search and save" requests, the orchestrator automatically runs:
-1. `web_agent` - Gathers information from the web
-2. `summary_agent` - Creates well-formatted markdown
-3. `file_agent` - Writes content to file
+**Dynamic Planning:**
+For any request, the LLM decides which agents to use and in what order. Example output:
+```
+[Request] search for 2025 ai news related to malaysia and save it into .md file
+[Planning] LLM planned 3 steps
+  1. web_agent: Research the topic and gather information from the web
+  2. summary_agent: Create a well-formatted summary from the research
+  3. file_agent: Write the summary to the specified file
+```
 
 ## Adding New Agents
 
