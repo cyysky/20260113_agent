@@ -13,7 +13,7 @@ Usage:
 import os
 import json
 import re
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional, Callable, Union
 from dotenv import load_dotenv
 from litellm import completion
 
@@ -124,10 +124,10 @@ Each step should have:
 - "input": what to pass ("user_message", "accumulated", "tool_results", or "step_output")
 
 Guidelines:
-1. For research + save tasks: use web_agent first, then summary_agent, then file_agent
+1. For file operations (list/read/write): use file_agent in a single step - it can handle multi-turn tool execution internally
 2. For web research: web_agent needs 10-15 turns to search and fetch multiple sources
 3. For summarization: pass the accumulated content or tool results
-4. For file writing: pass the final formatted content
+4. For research + save tasks: use web_agent first, then summary_agent, then file_agent
 5. Keep pipelines minimal - don't add unnecessary steps
 
 Example Response:
@@ -178,6 +178,10 @@ Example Response:
                 plan_data = json.loads(content)
                 steps = plan_data.get("steps", [])
 
+                # If LLM returned empty steps, it's casual conversation
+                if not steps:
+                    return None
+
                 # Convert to AgentStep objects, filtering valid agents
                 agent_steps = []
                 for step in steps:
@@ -186,7 +190,7 @@ Example Response:
                         agent_step = AgentStep(
                             agent_name=agent_name,
                             purpose=step.get("purpose", ""),
-                            max_turns=step.get("max_turns", 3),
+                            max_turns=step.get("max_turns", 10),
                             input_type=step.get("input", "user_message"),
                         )
                         agent_steps.append(agent_step)
@@ -207,8 +211,8 @@ Example Response:
         print("[Planning] Using fallback planner")
         return self._fallback_plan(user_message)
 
-    def _fallback_plan(self, user_message: str) -> List[AgentStep]:
-        """Simple fallback planner based on keywords."""
+    def _fallback_plan(self, user_message: str) -> Union[List[AgentStep], None]:
+        """Simple fallback planner based on keywords. Returns None for casual conversation."""
         message_lower = user_message.lower()
         steps = []
 
@@ -244,11 +248,11 @@ Example Response:
             steps.append(AgentStep(
                 agent_name="file_agent",
                 purpose="Perform file operation",
-                max_turns=3,
+                max_turns=10,
                 input_type="user_message"
             ))
 
-        return steps
+        return steps if steps else None
 
     def _extract_tool_results_from_history(self, conversation_history: list) -> str:
         """Extract full tool call results from conversation history."""
@@ -279,7 +283,16 @@ Example Response:
 
             # Determine input for this step
             if step.input_type == "user_message":
-                current_input = user_message
+                # If there's accumulated content from previous steps, include it
+                if accumulated_content and i > 0:
+                    current_input = f"""Original Request: {user_message}
+
+Previous Step Results:
+{accumulated_content}
+
+Continue by completing the current step: {step.purpose}"""
+                else:
+                    current_input = user_message
             elif step.input_type == "accumulated":
                 current_input = f"""Original Request: {user_message}
 
@@ -344,12 +357,38 @@ Original request: {user_message}"""
         # Let LLM plan the execution
         plan = self.plan_execution(user_message)
 
+        if plan is None:
+            # No execution needed - casual conversation
+            return self._handle_casual_conversation(user_message)
+
         if not plan:
             return "Error: Could not create execution plan."
 
         # Execute the plan
         result = self._execute_plan(user_message, plan)
         return result
+
+    def _handle_casual_conversation(self, user_message: str) -> str:
+        """Handle casual conversation using the LLM."""
+        casual_prompt = f"""You are a friendly orchestrator assistant. The user just said: "{user_message}"
+
+This appears to be casual conversation or a greeting. Respond in a friendly, helpful way.
+Mention you can help with file operations, web research, and summarization.
+
+Keep it concise and conversational. Plain text only, no special characters or emojis."""
+
+        try:
+            response = completion(
+                model=MODEL,
+                base_url=BASE_URL,
+                api_key=API_KEY,
+                messages=[{"role": "system", "content": casual_prompt}],
+            )
+            content = response.choices[0].message.content or "Hello! How can I help you today?"
+            # Remove any problematic characters
+            return content.encode('ascii', 'ignore').decode('ascii')
+        except Exception:
+            return "Hello! I'm an orchestrator for file, web, and summary agents. I can help you research topics, manage files, and create summaries. What would you like to do?"
 
     def run_loop(self):
         """Run the main interactive loop."""

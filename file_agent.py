@@ -15,6 +15,7 @@ The AI can autonomously call these functions:
 
 import os
 import json
+import re
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
@@ -174,24 +175,25 @@ TOOLS = [
     },
 ]
 
-SYSTEM_PROMPT = f"""You are a helpful file agent that helps users manage files.
+SYSTEM_PROMPT = f"""You are a helpful file agent that helps users manage files in: {FOLDER_PATH}
 
-You have access to three functions:
-1. **list_files** - List files in a folder
-2. **read_file** - Read the contents of a file
-3. **write_file** - Write content to a file
+You have access to these functions - USE THEM DIRECTLY when needed:
+- **list_files** - List files (no arguments needed)
+- **read_file** - Read file content (argument: filename)
+- **write_file** - Write content (arguments: filename, content)
 
-The base folder is: {FOLDER_PATH}
+RULES - Always follow these:
+1. If user says "list files", "show files", "what files exist" -> call list_files IMMEDIATELY
+2. If user says "read", "show content", "what's in" a file -> call read_file with the filename
+3. If user says "write", "create", "save" a file -> call write_file with filename and content
+4. If user wants to "read files content" but doesn't specify which -> call list_files first, then read files
 
-When a user asks you to perform file operations:
-- Use list_files to show what files are available
-- Use read_file to show contents when asked to read something
-- Use write_file to create or modify files
+When calling functions, output them in this format:
+<tool_call>
+{{"name": "function_name", "arguments": {{"arg1": "value1"}}}}
+</tool_call>
 
-IMPORTANT for multi-step requests:
-- If the user's request includes content to write (e.g., "save this information to a file" or the user provides markdown/text content), immediately use write_file with the appropriate filename and content.
-- Extract the filename from the user's request (e.g., "save to report.md" -> report.md)
-- Write the provided content exactly as given, or summarize/paraphrase if instructed
+IMPORTANT: Output the tool call format above, not JSON by itself. Do not ask the user for clarification - use the tools directly.
 
 Only access files within {FOLDER_PATH}. Be helpful and concise.
 """
@@ -261,6 +263,33 @@ def execute_tool_calls(tool_calls: list, available_functions: dict) -> list:
     return messages
 
 
+def parse_text_tool_calls(content: str) -> list:
+    """Parse text-based tool calls like <tool_call>{...}</tool_call>"""
+    import re
+
+    # Find all <tool_call>...</tool_call> blocks
+    pattern = r'<tool_call>(.*?)</tool_call>'
+    matches = re.findall(pattern, content, re.DOTALL)
+
+    tool_calls = []
+    for match in matches:
+        try:
+            tool_data = json.loads(match.strip())
+            name = tool_data.get("name")
+            arguments = tool_data.get("arguments", "{}")
+
+            if name and name in AVAILABLE_FUNCTIONS:
+                tool_calls.append({
+                    "id": f"text_{len(tool_calls)}",
+                    "name": name,
+                    "arguments": arguments
+                })
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return tool_calls
+
+
 def chat(user_message: str, conversation_history: list = None, max_turns: int = 5) -> tuple[str, list]:
     """Chat with the agent, handling function calls automatically."""
     if conversation_history is None:
@@ -284,30 +313,77 @@ def chat(user_message: str, conversation_history: list = None, max_turns: int = 
             return "Error: Invalid response from API", conversation_history
 
         response_message = response.choices[0].message
-        if not hasattr(response_message, 'tool_calls'):
+        content = response_message.content or ""
+
+        # Check for text-based tool calls (like <tool_call>{...}</tool_call>)
+        text_tool_calls = parse_text_tool_calls(content)
+
+        if not hasattr(response_message, 'tool_calls') and not text_tool_calls:
             # No tool calls, return regular response
-            content = response_message.content or ""
             new_history = conversation_history + [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": content},
             ]
             return content, new_history
 
-        tool_calls = response_message.tool_calls
+        # Get native tool calls or use text-based ones
+        tool_calls = getattr(response_message, 'tool_calls', None) or text_tool_calls
 
         # If no tool calls, return the regular response
         if not tool_calls:
-            content = response_message.content or ""
             new_history = conversation_history + [
                 {"role": "user", "content": user_message},
                 {"role": "assistant", "content": content},
             ]
             return content, new_history
 
-        # Append assistant's message with tool calls
+        # Remove text tool calls from content for cleaner output
+        cleaned_content = re.sub(r'<?\[?tool_call\]?>\s*\{.*?\}\s*(</tool_call>)?', '', content, flags=re.DOTALL).strip()
+
+        # If using text-based tool calls, execute them directly
+        if text_tool_calls and not getattr(response_message, 'tool_calls', None):
+            tool_results = []
+            for tc in text_tool_calls:
+                function_name = tc["name"]
+                function_to_call = AVAILABLE_FUNCTIONS.get(function_name)
+                if function_to_call:
+                    try:
+                        args = json.loads(tc["arguments"]) if isinstance(tc["arguments"], str) else tc["arguments"]
+                        response_text = function_to_call(**args)
+                        tool_results.append({
+                            "tool_call_id": tc["id"],
+                            "role": "tool",
+                            "name": function_name,
+                            "content": response_text,
+                        })
+                    except Exception as e:
+                        tool_results.append({
+                            "tool_call_id": tc["id"],
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: {e}",
+                        })
+
+            messages.extend(tool_results)
+
+            # Get final response from model
+            messages.append({"role": "user", "content": "Please provide a helpful response based on the tool results above."})
+            final_response = call_agent(messages, tools=None, tool_choice=None)
+
+            if "error" in final_response:
+                return final_response["error"], messages
+
+            final_message = final_response.choices[0].message
+
+            conversation_history = messages + [
+                {"role": "assistant", "content": final_message.content},
+            ]
+            return final_message.content or cleaned_content, conversation_history
+
+        # Native tool calls - append and execute
         messages.append({
             "role": "assistant",
-            "content": response_message.content,
+            "content": cleaned_content,
             "tool_calls": [
                 {
                     "id": tc.id,
@@ -332,13 +408,52 @@ def chat(user_message: str, conversation_history: list = None, max_turns: int = 
             return "Error: Invalid final response from API", messages
 
         final_message = final_response.choices[0].message
+        final_content = final_message.content or ""
+
+        # Check for text-based tool calls in the final response
+        final_text_tool_calls = parse_text_tool_calls(final_content)
+
+        # If there are text-based tool calls, execute them and get another response
+        while final_text_tool_calls:
+            # Execute text-based tool calls
+            for tc in final_text_tool_calls:
+                function_name = tc["name"]
+                function_to_call = AVAILABLE_FUNCTIONS.get(function_name)
+                if function_to_call:
+                    try:
+                        args = json.loads(tc["arguments"]) if isinstance(tc["arguments"], str) else tc["arguments"]
+                        response_text = function_to_call(**args)
+                        messages.append({
+                            "tool_call_id": tc["id"],
+                            "role": "tool",
+                            "name": function_name,
+                            "content": response_text,
+                        })
+                    except Exception as e:
+                        messages.append({
+                            "tool_call_id": tc["id"],
+                            "role": "tool",
+                            "name": function_name,
+                            "content": f"Error: {e}",
+                        })
+
+            # Get another response from model
+            messages.append({"role": "user", "content": "Continue - provide your response based on the tool results."})
+            final_response = call_agent(messages, tools=None, tool_choice=None)
+
+            if "error" in final_response:
+                return final_response["error"], messages
+
+            final_message = final_response.choices[0].message
+            final_content = final_message.content or ""
+            final_text_tool_calls = parse_text_tool_calls(final_content)
 
         # Update conversation history
         conversation_history = messages + [
-            {"role": "assistant", "content": final_message.content},
+            {"role": "assistant", "content": final_content},
         ]
 
-        return final_message.content or "", conversation_history
+        return final_content or "", conversation_history
 
     except Exception as e:
         return f"Error in file_agent: {str(e)}", conversation_history

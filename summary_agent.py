@@ -134,6 +134,8 @@ def chat(user_message: str, conversation_history: list = None, max_turns: int = 
             return response["error"], conversation_history
 
         content = response.choices[0].message.content or ""
+        # Remove non-ASCII characters that cause encoding issues on Windows
+        content = content.encode('ascii', 'ignore').decode('ascii')
         new_history = conversation_history + [
             {"role": "user", "content": user_message},
             {"role": "assistant", "content": content},
