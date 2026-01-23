@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"\nimport os\nfrom dotenv import load_dotenv\nload_dotenv\\(override=True\\)\n\nfrom file_agent import chat\n\nuser_msg = ''''''Original Request: read the files content and tell me what it\n\nPrevious Step Results:\n\nContinue by completing the current step: List and read the content of available files to understand what they contain''''''\n\nresponse, history = chat\\(user_msg, []\\)\nprint\\(''Response:''\\)\nprint\\(response[:800] if len\\(response\\) > 800 else response\\)\n\")",
+      "Bash(python -c \"\nimport os\nfrom dotenv import load_dotenv\nload_dotenv\\(override=True\\)\n\nfrom file_agent import chat\n\nuser_msg = ''''''Original Request: read the files content and tell me what it\n\nPrevious Step Results:\n\nContinue by completing the current step: List and read the content of available files to understand what they contain''''''\n\nresponse, history = chat\\(user_msg, []\\)\nprint\\(''Response:''\\)\nprint\\(response[:1000] if len\\(response\\) > 1000 else response\\)\n\")"
+    ]
+  }
+}

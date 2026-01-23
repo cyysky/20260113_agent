@@ -3,6 +3,8 @@
 .env.local
 .env.*.local
 
+bm25_index.pkl
+
 # Python
 __pycache__/
 *.py[cod]

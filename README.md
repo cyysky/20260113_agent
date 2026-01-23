@@ -39,6 +39,72 @@ Creates well-formatted markdown summaries from raw research data.
 
 **See:** [Summary Agent Documentation](summary_agent.py)
 
+### BM25 Search Agent
+
+Searches through `.txt` files using the Okapi BM25 ranking algorithm with LLM-powered adaptive research.
+
+**Features:**
+- **BM25 Ranking**: Full-text search with relevance scoring
+- **Persistent Index**: Index saved to disk and auto-loaded
+- **Auto-Reindex**: Rebuilds when files change
+- **Adaptive 20-Turn Research**: LLM generates query variations based on found content
+- **LLM Key Concepts**: Extracts key concepts from documents using LLM
+- **1008+ Files**: Handles large document collections with 25,000+ unique terms
+
+**Environment Variables:**
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `AI_FOLDER_PATH` | Folder containing .txt files | `./ai_files` |
+| `BM25_INDEX_PATH` | Path to save/load index | `./bm25_index.pkl` |
+
+**Usage:**
+```bash
+# Interactive mode
+python search_agent.py
+
+# Commands in interactive mode:
+/search <query>    # Run 20-turn adaptive research
+/stats             # Show index statistics
+/reindex           # Rebuild the index
+```
+
+**Python API:**
+```python
+from search_agent import (
+    search_files,          # Simple BM25 search
+    simple_research_loop,  # 20-turn adaptive research with LLM
+    save_full_research_report,  # Save complete report with full content
+    generate_markdown_report,   # Generate markdown summary
+    get_index_stats,       # Get index statistics
+    extract_key_concepts,  # Extract concepts using LLM
+)
+
+# Simple search
+results = search_files("pembaikan kerosakan kecil", top_k=10)
+
+# 20-turn adaptive research (LLM generates queries)
+results = simple_research_loop(
+    "EMBAIKAN KEROSAKAN KECIL PEJABAT KERAJAAN",
+    max_turns=20,
+    top_k=10
+)
+
+# Save full report with complete document contents
+save_full_research_report(results)
+generate_markdown_report(results)
+
+# Extract key concepts from content
+concepts = extract_key_concepts(document_content, max_concepts=10)
+```
+
+**How Adaptive Research Works:**
+1. **Turn 1**: Search with original query
+2. **Turn 2-5**: Use LLM to analyze found documents and generate query variations
+3. **Turn 6-15**: Continue exploring related terms and concepts
+4. **Turn 16-20**: Deep exploration with specific terms from previous results
+
+**See:** [Search Agent Documentation](search_agent.py)
+
 ### Orchestrator Agent
 
 Coordinates multiple agents using LLM-planned workflows.
@@ -63,6 +129,8 @@ Set the following environment variables in `.env`:
 | `LITELLM_BASEURL` | LiteLLM API base URL | (required) |
 | `LITELLM_API_KEY` | API key for authentication | (required) |
 | `LITELLM_MODEL` | Model name to use | `gpt-3.5-turbo-1106` |
+| `AI_FOLDER_PATH` | Folder for search agent (contains .txt files) | `./ai_files` |
+| `BM25_INDEX_PATH` | Path for BM25 index file | `./bm25_index.pkl` |
 
 ## Installation
 
@@ -106,6 +174,12 @@ python orchestrator.py
 > search for 2025 ai news related to malaysia and save it into .md file
 > find information about python tutorials and write to notes.md
 > look up latest tech news and create a summary document
+> research about EMBAIKAN KEROSAKAN KECIL PEJABAT KERAJAAN using search agent and save results
+```
+
+**Example with Search Agent (20-turn research):**
+```
+> use search_agent loop for 20 times to gather about EMBAIKAN KEROSAKAN KECIL PEJABAT-PEJABAT KERAJAAN NEGERI SABAH
 ```
 
 **Available commands in Orchestrator:**

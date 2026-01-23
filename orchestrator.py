@@ -513,6 +513,20 @@ def create_summary_agent():
     )
 
 
+def create_search_agent():
+    """Create a search agent from search_agent module."""
+    import search_agent
+
+    return Agent(
+        name="search_agent",
+        description="BM25 file search - search through .txt files using BM25 ranking",
+        system_prompt=search_agent.SYSTEM_PROMPT,
+        tools=search_agent.TOOLS,
+        available_functions=search_agent.AVAILABLE_FUNCTIONS,
+        chat_func=search_agent.chat,
+    )
+
+
 def main():
     """Main entry point for the orchestrator."""
     orchestrator = Orchestrator()
@@ -521,6 +535,7 @@ def main():
     orchestrator.register_agent(create_file_agent())
     orchestrator.register_agent(create_web_agent())
     orchestrator.register_agent(create_summary_agent())
+    orchestrator.register_agent(create_search_agent())
 
     # Run the interactive loop
     orchestrator.run_loop()
